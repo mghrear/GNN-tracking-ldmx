@@ -12,6 +12,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from torch_geometric.utils import scatter
+
+
 
 
 
@@ -19,12 +22,14 @@ from mpl_toolkits.mplot3d import Axes3D
 class MyInMemoryDataset(InMemoryDataset):
 
     # In EC mode the dataset includes a feature tensor (x), edge_index where edges connect space points in adjacent layers, and labels (y) indicating whether the edge connects true space points from the same track.
+    # For EC model and additional argument is needed to specify the number of primary electrons per event (n_primaries). This is only needed to build edge labels for training. 
     # In OC mode the data includes a feature tensor (x) and labels (y) indicating the true track ID for each space point.
 
-    def __init__(self, df, mode = "EC"):
+    def __init__(self, df, n_primaries = None, mode = "EC"):
         super().__init__()
         self.df = df.reset_index(drop=True)
         self.mode = mode
+        self.n_primaries = n_primaries
 
     def len(self):
         return len(self.df)
@@ -57,13 +62,17 @@ class MyInMemoryDataset(InMemoryDataset):
             TID = torch.abs(vID[:, None] - vID[None, :]) == 0.0
             T_truth = TID * T
 
+            # Remove edges connecting non-primaries
+            NopT = vID > self.n_primaries
+            T_truth[:,NopT] = False
+            T_truth[NopT,:] = False
+
             iT, jT = T_truth.nonzero(as_tuple=True)
             edge_index_truth = torch.stack((iT, jT), dim=0)    # shape (2, n_edges)
 
             y = (edge_index.T[:, None, :] == edge_index_truth.T[None, :, :]).all(dim=2).any(dim=1).float()
 
             return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, y=y)
-
 
 
         elif self.mode == "OC":
@@ -134,7 +143,30 @@ class InteractionNetwork(MessagePassing):
 
     def update(self, aggr_out, x):
         c = torch.cat([x, aggr_out], dim=1)
-        return self.O(c) 
+        return self.O(c)
+    
+
+class INLayer(torch.nn.Module):
+    def __init__(self, node_dim, edge_dim, hidden, aggr='sum'):
+        super().__init__()
+        self.fR = MLP(2*node_dim + edge_dim, edge_dim, hidden)  # edge -> edge
+        self.fO = MLP(node_dim + edge_dim, node_dim, hidden)    # node -> node
+        self.aggr = aggr
+
+    def forward(self, x, edge_index, e):
+        src, dst = edge_index  # src=j, dst=i (messages go src->dst)
+
+        # edge update: e'_{j->i}
+        m_in = torch.cat([x[dst], x[src], e], dim=-1)
+        e_new = self.fR(m_in)                      # [E, edge_dim]
+
+        # aggregate to nodes: sum over incoming edges
+        agg = scatter(e_new, dst, dim=0, dim_size=x.size(0), reduce='sum')  # [N, edge_dim]
+
+        # node update
+        x_new = self.fO(torch.cat([x, agg], dim=-1))  # [N, node_dim]
+
+        return x_new, e_new
     
 
 
