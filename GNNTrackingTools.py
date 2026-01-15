@@ -16,9 +16,6 @@ from torch_geometric.utils import scatter
 
 
 
-
-
-
 class MyInMemoryDataset(InMemoryDataset):
 
     # In EC mode the dataset includes a feature tensor (x), edge_index where edges connect space points in adjacent layers, and labels (y) indicating whether the edge connects true space points from the same track.
@@ -34,6 +31,7 @@ class MyInMemoryDataset(InMemoryDataset):
     def len(self):
         return len(self.df)
 
+    #TODO: Move the operations outside of get to speed up data loading
     def get(self, idx):
 
         # Build the feature tensor
@@ -115,12 +113,12 @@ class ObjectModel(nn.Module):
 
 # from https://github.com/GageDeZoort/interaction_network_paper
 class InteractionNetwork(MessagePassing):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size=40, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3):
         super(InteractionNetwork, self).__init__(aggr='add', 
                                                  flow='source_to_target')
-        self.R1 = RelationalModel(9, 4, hidden_size)
-        self.O = ObjectModel(7, 3, hidden_size)
-        self.R2 = RelationalModel(10, 1, hidden_size)
+        self.R1 = RelationalModel(2*node_feat_in+edge_feat_in, edge_feat_out, hidden_size)
+        self.O = ObjectModel(node_feat_in+edge_feat_out, node_feat_out, hidden_size)
+        self.R2 = RelationalModel(2*node_feat_out+edge_feat_out, 1, hidden_size)
         self.E: Tensor = Tensor()
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
@@ -146,31 +144,51 @@ class InteractionNetwork(MessagePassing):
         return self.O(c)
     
 
-class INLayer(torch.nn.Module):
-    def __init__(self, node_dim, edge_dim, hidden, aggr='sum'):
-        super().__init__()
-        self.fR = MLP(2*node_dim + edge_dim, edge_dim, hidden)  # edge -> edge
-        self.fO = MLP(node_dim + edge_dim, node_dim, hidden)    # node -> node
-        self.aggr = aggr
+class INLayer(MessagePassing):
+    def __init__(self, hidden_size=40, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3):
+        super(INLayer, self).__init__(aggr='add', 
+                                                 flow='source_to_target')
+        self.R1 = RelationalModel(2*node_feat_in+edge_feat_in, edge_feat_out, hidden_size)
+        self.O = ObjectModel(node_feat_in+edge_feat_out, node_feat_out, hidden_size)
+        self.E: Tensor = Tensor()
 
-    def forward(self, x, edge_index, e):
-        src, dst = edge_index  # src=j, dst=i (messages go src->dst)
+    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor):
+        x_tilde = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        return x_tilde, self.E
 
-        # edge update: e'_{j->i}
-        m_in = torch.cat([x[dst], x[src], e], dim=-1)
-        e_new = self.fR(m_in)                      # [E, edge_dim]
+    def message(self, x_i, x_j, edge_attr):
+        # x_i --> incoming
+        # x_j --> outgoing
+        m1 = torch.cat([x_i, x_j, edge_attr], dim=1)
+        self.E = self.R1(m1)
+        return self.E
 
-        # aggregate to nodes: sum over incoming edges
-        agg = scatter(e_new, dst, dim=0, dim_size=x.size(0), reduce='sum')  # [N, edge_dim]
+    def update(self, aggr_out, x):
+        c = torch.cat([x, aggr_out], dim=1)
+        return self.O(c)
+    
+class MyIN(nn.Module):
+    def __init__(self, hidden_size):
+        super(MyIN, self).__init__()
 
-        # node update
-        x_new = self.fO(torch.cat([x, agg], dim=-1))  # [N, node_dim]
+        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3)
+        self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3)
+        self.R2 = RelationalModel(2*3+3, 1, hidden_size)
 
-        return x_new, e_new
+    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor):
+
+        x, edge_attr = self.IN1(x, edge_index, edge_attr)
+        x, edge_attr = self.IN2(x, edge_index, edge_attr)
+
+        edge_final = torch.cat([x[edge_index[1]],
+                        x[edge_index[0]],
+                        edge_attr], dim=1)
+
+        return torch.sigmoid(self.R2(edge_final))
     
 
 
-def plot_pyg_graph_3d(data, plot_truth=False, node_size=30, lw=0.8):
+def plot_pyg_graph_3d(data, plot_truth=False, plot_pred=False, node_size=30, lw=0.8):
     # Node positions (N,3)
     pos = data.x[:, :3].detach().cpu()
     edge_index = data.edge_index.detach().cpu()
@@ -192,9 +210,9 @@ def plot_pyg_graph_3d(data, plot_truth=False, node_size=30, lw=0.8):
 
         ax.plot(xs, ys, zs, color="k", linewidth=lw, alpha=0.35)
 
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_zlabel("z [mm]")
     plt.tight_layout()
     plt.show()
 
@@ -202,6 +220,34 @@ def plot_pyg_graph_3d(data, plot_truth=False, node_size=30, lw=0.8):
         # Node positions (N,3)
         pos = data.x[:, :3].detach().cpu()
         edge_index = data.edge_index[:,data.y.bool()].detach().cpu()
+
+
+        fig = plt.figure(figsize=(8, 7))
+        ax = fig.add_subplot(111, projection="3d")
+
+        # nodes
+        ax.scatter(pos[:,0], pos[:,1], pos[:,2], s=node_size)
+
+        # edges
+        for e in range(edge_index.size(1)):
+            i, j = edge_index[:, e]
+            xs = [pos[i,0], pos[j,0]]
+            ys = [pos[i,1], pos[j,1]]
+            zs = [pos[i,2], pos[j,2]]
+
+
+            ax.plot(xs, ys, zs, color="k", linewidth=lw, alpha=0.35)
+
+        ax.set_xlabel("x [mm]")
+        ax.set_ylabel("y [mm]")
+        ax.set_zlabel("z [mm]")
+        plt.tight_layout()
+        plt.show()
+
+    if plot_pred:
+        # Node positions (N,3)
+        pos = data.x[:, :3].detach().cpu()
+        edge_index = data.edge_index[:,data.pred.bool()].detach().cpu()
 
 
         fig = plt.figure(figsize=(8, 7))
