@@ -1,3 +1,4 @@
+from time import time
 import torch
 import torch_geometric
 from torch import Tensor
@@ -19,19 +20,16 @@ from torch_geometric.utils import scatter
 class MyInMemoryDataset(InMemoryDataset):
 
     # In EC mode the dataset includes a feature tensor (x), edge_index where edges connect space points in adjacent layers, and labels (y) indicating whether the edge connects true space points from the same track.
-    # For EC model and additional argument is needed to specify the number of primary electrons per event (n_primaries). This is only needed to build edge labels for training. 
     # In OC mode the data includes a feature tensor (x) and labels (y) indicating the true track ID for each space point.
 
     def __init__(self, df, n_primaries = None, mode = "EC"):
         super().__init__()
         self.df = df.reset_index(drop=True)
         self.mode = mode
-        self.n_primaries = n_primaries
 
     def len(self):
         return len(self.df)
 
-    #TODO: Move the operations outside of get to speed up data loading
     def get(self, idx):
 
         # Build the feature tensor
@@ -39,36 +37,10 @@ class MyInMemoryDataset(InMemoryDataset):
         x = torch.Tensor([self.df.Digi_x[idx], self.df.Digi_y[idx], self.df.Digi_z[idx]]).T
 
         if self.mode == "EC":
-            v_pos = torch.Tensor(self.df.iloc[idx].Digi_x)
 
-
-            # Make edges connect space point in subsequent layers only
-            Ta = torch.abs(v_pos[:, None] - v_pos[None, :]) < 95.0
-            Tb = torch.abs(v_pos[:, None] - v_pos[None, :]) > 5.0
-            T = Ta*Tb
-
-            i_idx, j_idx = T.nonzero(as_tuple=True)
-            edge_index = torch.stack((i_idx, j_idx), dim=0)    # shape (2, n_edges)
-
-            # Build edge features as vector distance between connected nodes
-            src = edge_index[0]
-            dst = edge_index[1]
-            edge_feat = x[dst] - x[src]  # [E, F]
-
-            # Find edges that connect space points in subsequent layers from the same track
-            vID = torch.Tensor(self.df.iloc[idx].Digi_ID)
-            TID = torch.abs(vID[:, None] - vID[None, :]) == 0.0
-            T_truth = TID * T
-
-            # Remove edges connecting non-primaries
-            NopT = vID > self.n_primaries
-            T_truth[:,NopT] = False
-            T_truth[NopT,:] = False
-
-            iT, jT = T_truth.nonzero(as_tuple=True)
-            edge_index_truth = torch.stack((iT, jT), dim=0)    # shape (2, n_edges)
-
-            y = (edge_index.T[:, None, :] == edge_index_truth.T[None, :, :]).all(dim=2).any(dim=1).float()
+            edge_index = torch.stack([ torch.Tensor(self.df.edge_index_0[idx]),torch.Tensor(self.df.edge_index_1[idx])]).to(torch.int)
+            edge_feat = torch.stack([torch.Tensor(self.df.edge_feat_0[idx]),torch.Tensor(self.df.edge_feat_1[idx]),torch.Tensor(self.df.edge_feat_2[idx])]).T
+            y = torch.Tensor(self.df.edge_label[idx])
 
             return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, y=y)
 
@@ -171,9 +143,9 @@ class MyIN(nn.Module):
     def __init__(self, hidden_size):
         super(MyIN, self).__init__()
 
-        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3)
-        self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=3, edge_feat_out=3)
-        self.R2 = RelationalModel(2*3+3, 1, hidden_size)
+        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=5, edge_feat_out=5)
+        self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 5, edge_feat_in = 5, node_feat_out=7, edge_feat_out=7)
+        self.R2 = RelationalModel(2*7+7, 1, hidden_size)
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor):
 
@@ -273,3 +245,149 @@ def plot_pyg_graph_3d(data, plot_truth=False, plot_pred=False, node_size=30, lw=
         plt.show()
 
 
+# Processes pandas dataframe to get graph information
+# n_primaries is the number of primaries simulated, this is only needed for label building 
+def GetGraphInfo(row,n_primaries):
+
+    x = np.stack([np.asarray(row.Digi_x),
+                np.asarray(row.Digi_y),
+                np.asarray(row.Digi_z)], axis=1)
+
+    v_pos = np.asarray(row.Digi_x)   # shape (N,)
+
+    # Make edges connect space point in subsequent layers only
+    D = np.abs(v_pos[:, None] - v_pos[None, :])   # shape (N, N)
+    T = (D < 110.0) & (D > 5.0)     
+
+    # indices where T is True
+    i_idx, j_idx = np.nonzero(T)                  # each shape (n_edges,)
+    edge_index = np.stack((i_idx, j_idx), axis=0) # shape (2, n_edges)
+
+    # Build edge features as vector distance between connected nodes
+    src = edge_index[0]
+    dst = edge_index[1]
+    edge_feat = x[dst] - x[src]  # [E, F]
+
+    # Find edges that connect space points in subsequent layers from the same track
+    vID = np.asarray(row.Digi_ID)
+    TID = np.abs(vID[:, None] - vID[None, :]) == 0.0
+    T_truth = TID * T 
+
+    # Remove edges connecting non-primaries
+    NopT = vID > n_primaries
+    T_truth[:,NopT] = False
+    T_truth[NopT,:] = False
+
+    iT, jT = np.nonzero(T_truth)
+    edge_index_truth = np.stack((iT, jT), axis=0)    # shape (2, n_edges)
+
+    edge_label = (edge_index.T[:, None, :] == edge_index_truth.T[None, :, :]).all(axis=2).any(axis=1).astype(np.float32)
+
+    return edge_index[0], edge_index[1], edge_feat.T[0], edge_feat.T[1], edge_feat.T[2], edge_label 
+
+
+
+def train(model, device, train_loader, optimizer, epoch):
+    model.train()
+    epoch_t0 = time()
+    losses = []
+    for batch_idx, data in enumerate(train_loader):
+        data = data.to(device)
+        optimizer.zero_grad()
+        output = model(data.x, data.edge_index, data.edge_attr)
+        y, output = data.y, output.squeeze(1)
+        loss = F.binary_cross_entropy(output, y, reduction='mean')
+        loss.backward()
+        optimizer.step()
+        # if batch_idx % 10 == 0:
+        #     print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+        #         epoch, batch_idx, len(train_loader.dataset),
+        #         100. * batch_idx / len(train_loader), loss.item()))
+        losses.append(loss.item())
+    print("...epoch time: {0}s".format(time()-epoch_t0))
+    print("...epoch {}: train loss={}".format(epoch, np.mean(losses)))
+    return np.mean(losses)
+
+def validate(model, device, val_loader):
+    model.eval()
+    opt_thlds, accs, losses = [], [], []
+    for batch_idx, data in enumerate(val_loader):
+        data = data.to(device)
+        output = model(data.x, data.edge_index, data.edge_attr)
+        y, output = data.y, output.squeeze()
+        loss = F.binary_cross_entropy(output, y, reduction='mean').item()
+        losses.append(loss)
+        
+        # define optimal threshold (thld) where TPR = TNR 
+        diff, opt_thld, opt_acc = 100, 0, 0
+        best_tpr, best_tnr = 0, 0
+        for thld in np.arange(0.001, 0.5, 0.001):
+            TP = torch.sum((y==1) & (output>thld)).item()
+            TN = torch.sum((y==0) & (output<thld)).item()
+            FP = torch.sum((y==0) & (output>thld)).item()
+            FN = torch.sum((y==1) & (output<thld)).item()
+            acc = (TP+TN)/(TP+TN+FP+FN)
+            TPR, TNR = TP/(TP+FN), TN/(TN+FP)
+            delta = abs(TPR-TNR)
+            if (delta < diff): 
+                diff, opt_thld, opt_acc = delta, thld, acc
+
+        opt_thlds.append(opt_thld)
+        accs.append(opt_acc)
+
+    print("...val accuracy=", np.mean(accs))
+    print("...val loss=", np.mean(losses))
+    return np.mean(opt_thlds), np.mean(losses) 
+
+def test(model, device, test_loader, thld=0.5):
+    model.eval()
+    losses, accs = [], []
+    with torch.no_grad():
+        for batch_idx, data in enumerate(test_loader):
+            data = data.to(device)
+            output = model(data.x, data.edge_index, data.edge_attr)
+            TP = torch.sum((data.y==1).squeeze() & 
+                           (output>thld).squeeze()).item()
+            TN = torch.sum((data.y==0).squeeze() & 
+                           (output<thld).squeeze()).item()
+            FP = torch.sum((data.y==0).squeeze() & 
+                           (output>thld).squeeze()).item()
+            FN = torch.sum((data.y==1).squeeze() & 
+                           (output<thld).squeeze()).item()            
+            acc = (TP+TN)/(TP+TN+FP+FN)
+            loss = F.binary_cross_entropy(output.squeeze(1), data.y, 
+                                          reduction='mean').item()
+            accs.append(acc)
+            losses.append(loss)
+            #print(f"acc={TP+TN}/{TP+TN+FP+FN}={acc}")
+
+    return np.mean(losses), np.mean(accs)
+
+
+def PrimitiveTrackBuilder(model, device, test_loader, thld=0.5, min_nodes =4):
+    df_tracks = pd.DataFrame(columns=['x', 'y', 'z'])
+
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, data in enumerate(test_loader):
+
+            # Move datat to device 
+            data = data.to(device)
+
+            # GNN inference
+            output = model(data.x, data.edge_index, data.edge_attr)
+
+            # Extract prediction from GNN output
+            y_pred = output.squeeze()>thld 
+            #y_pred = data.y.bool() # This method cheats, using truth info
+
+            data.edge_index = data.edge_index[:,y_pred]
+
+            for subgraph in data.connected_components():
+
+                if subgraph.x.shape[0] > min_nodes:
+
+                    df_new = pd.DataFrame([{'x': np.asarray(subgraph.x[:,0].cpu()), 'y': np.asarray(subgraph.x[:,1].cpu()), 'z' : np.asarray(subgraph.x[:,2].cpu())}])
+                    df_tracks = pd.concat([df_tracks, df_new], ignore_index=True)
+
+    return df_tracks
