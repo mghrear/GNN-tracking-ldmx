@@ -42,7 +42,7 @@ class MyInMemoryDataset(InMemoryDataset):
             edge_feat = torch.stack([torch.Tensor(self.df.edge_feat_0[idx]),torch.Tensor(self.df.edge_feat_1[idx]),torch.Tensor(self.df.edge_feat_2[idx])]).T
             y = torch.Tensor(self.df.edge_label[idx])
 
-            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, y=y)
+            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truth_ID = torch.Tensor(self.df.iloc[idx].Digi_ID), y=y)
 
 
         elif self.mode == "OC":
@@ -143,14 +143,16 @@ class MyIN(nn.Module):
     def __init__(self, hidden_size):
         super(MyIN, self).__init__()
 
-        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=5, edge_feat_out=5)
-        self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 5, edge_feat_in = 5, node_feat_out=7, edge_feat_out=7)
-        self.R2 = RelationalModel(2*7+7, 1, hidden_size)
+        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=6, edge_feat_out=6)
+        self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 6, edge_feat_in = 6, node_feat_out=8, edge_feat_out=8)
+        self.IN3 = INLayer(hidden_size=hidden_size, node_feat_in = 8, edge_feat_in = 8, node_feat_out=9, edge_feat_out=9)
+        self.R2 = RelationalModel(2*9+9, 1, hidden_size)
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor):
 
         x, edge_attr = self.IN1(x, edge_index, edge_attr)
         x, edge_attr = self.IN2(x, edge_index, edge_attr)
+        x, edge_attr = self.IN3(x, edge_index, edge_attr)
 
         edge_final = torch.cat([x[edge_index[1]],
                         x[edge_index[0]],
@@ -286,7 +288,6 @@ def GetGraphInfo(row,n_primaries):
     return edge_index[0], edge_index[1], edge_feat.T[0], edge_feat.T[1], edge_feat.T[2], edge_label 
 
 
-
 def train(model, device, train_loader, optimizer, epoch):
     model.train()
     epoch_t0 = time()
@@ -308,40 +309,25 @@ def train(model, device, train_loader, optimizer, epoch):
     print("...epoch {}: train loss={}".format(epoch, np.mean(losses)))
     return np.mean(losses)
 
+
 def validate(model, device, val_loader):
     model.eval()
-    opt_thlds, accs, losses = [], [], []
+    losses = []
     for batch_idx, data in enumerate(val_loader):
         data = data.to(device)
         output = model(data.x, data.edge_index, data.edge_attr)
         y, output = data.y, output.squeeze()
         loss = F.binary_cross_entropy(output, y, reduction='mean').item()
         losses.append(loss)
-        
-        # define optimal threshold (thld) where TPR = TNR 
-        diff, opt_thld, opt_acc = 100, 0, 0
-        best_tpr, best_tnr = 0, 0
-        for thld in np.arange(0.001, 0.5, 0.001):
-            TP = torch.sum((y==1) & (output>thld)).item()
-            TN = torch.sum((y==0) & (output<thld)).item()
-            FP = torch.sum((y==0) & (output>thld)).item()
-            FN = torch.sum((y==1) & (output<thld)).item()
-            acc = (TP+TN)/(TP+TN+FP+FN)
-            TPR, TNR = TP/(TP+FN), TN/(TN+FP)
-            delta = abs(TPR-TNR)
-            if (delta < diff): 
-                diff, opt_thld, opt_acc = delta, thld, acc
 
-        opt_thlds.append(opt_thld)
-        accs.append(opt_acc)
-
-    print("...val accuracy=", np.mean(accs))
     print("...val loss=", np.mean(losses))
-    return np.mean(opt_thlds), np.mean(losses) 
+
+    return np.mean(losses) 
 
 def test(model, device, test_loader, thld=0.5):
     model.eval()
-    losses, accs = [], []
+    losses, accs, TPRs, TNRs = [], [], [], []
+    labels, preds = [], []
     with torch.no_grad():
         for batch_idx, data in enumerate(test_loader):
             data = data.to(device)
@@ -355,16 +341,23 @@ def test(model, device, test_loader, thld=0.5):
             FN = torch.sum((data.y==1).squeeze() & 
                            (output<thld).squeeze()).item()            
             acc = (TP+TN)/(TP+TN+FP+FN)
+            TPR = TP / (TP+FN)
+            TNR = TN / (TN+FP)
+
             loss = F.binary_cross_entropy(output.squeeze(1), data.y, 
                                           reduction='mean').item()
             accs.append(acc)
+            TPRs.append(TPR)
+            TNRs.append(TNR)
             losses.append(loss)
-            #print(f"acc={TP+TN}/{TP+TN+FP+FN}={acc}")
+            
+            labels += data.y.cpu().tolist()
+            preds += output.squeeze().cpu().tolist()
 
-    return np.mean(losses), np.mean(accs)
+    return np.mean(losses), np.mean(accs), np.mean(TPRs), np.mean(TNRs), labels, preds
 
 
-def PrimitiveTrackBuilder(model, device, test_loader, thld=0.5, min_nodes =4):
+def PrimitiveTrackBuilder(model, device, test_loader, thld=0.5, min_nodes = 5, use_truth_labels = False):
     df_tracks = pd.DataFrame(columns=['x', 'y', 'z'])
 
     model.eval()
@@ -377,15 +370,18 @@ def PrimitiveTrackBuilder(model, device, test_loader, thld=0.5, min_nodes =4):
             # GNN inference
             output = model(data.x, data.edge_index, data.edge_attr)
 
-            # Extract prediction from GNN output
-            y_pred = output.squeeze()>thld 
-            #y_pred = data.y.bool() # This method cheats, using truth info
+            if use_truth_labels:
+                # This method cheats, using truth info
+                y_pred = data.y.bool()
+            else: 
+                # Extract prediction from GNN output
+                y_pred = output.squeeze()>thld 
 
             data.edge_index = data.edge_index[:,y_pred]
 
             for subgraph in data.connected_components():
 
-                if subgraph.x.shape[0] > min_nodes:
+                if subgraph.x.shape[0] >= min_nodes:
 
                     df_new = pd.DataFrame([{'x': np.asarray(subgraph.x[:,0].cpu()), 'y': np.asarray(subgraph.x[:,1].cpu()), 'z' : np.asarray(subgraph.x[:,2].cpu())}])
                     df_tracks = pd.concat([df_tracks, df_new], ignore_index=True)
