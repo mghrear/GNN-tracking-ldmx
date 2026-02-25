@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import inspect
+from pathlib import Path
 
 
 class MyInMemoryDataset(InMemoryDataset):
@@ -30,11 +31,55 @@ class MyInMemoryDataset(InMemoryDataset):
 
         if self.mode == "EC":
 
+            # Make Edge Index Tensor
             edge_index = torch.stack([ torch.Tensor(self.df.edge_index_0[idx]),torch.Tensor(self.df.edge_index_1[idx])]).to(torch.int)
+            # Create corresponding Edge Feature Tensor
             edge_feat = torch.stack([torch.Tensor(self.df.edge_feat_0[idx]),torch.Tensor(self.df.edge_feat_1[idx]),torch.Tensor(self.df.edge_feat_2[idx])]).T
+            # Edge Labels
             y = torch.Tensor(self.df.edge_label[idx])
 
-            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truth_ID = torch.Tensor(self.df.iloc[idx].Digi_trackID), pdg_ID = torch.Tensor(self.df.iloc[idx].Digi_pdgID), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y)
+            # x is node features, truth_ID give the truth track_ID, Edep gives the energy deposition, 
+            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
+            # PDG ID can be added in the future by uncommenting 
+            #return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), pdgID = torch.Tensor(self.df.iloc[idx].Digi_pdgID), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
+
+
+        elif self.mode == "OC":
+            y = torch.Tensor(self.df.iloc[idx].Digi_trackID)
+
+            return Data(x=x, y=y)
+        
+
+class MyInMemoryDataset_signal(InMemoryDataset):
+
+    # In EC mode the dataset includes a feature tensor (x), edge_index where edges connect space points in adjacent layers, and labels (y) indicating whether the edge connects true space points from the same track.
+    # In OC mode the data includes a feature tensor (x) and labels (y) indicating the true track ID for each space point.
+
+    def __init__(self, df, mode = "EC"):
+        super().__init__()
+        self.df = df.reset_index(drop=True)
+        self.mode = mode
+
+    def len(self):
+        return len(self.df)
+
+    def get(self, idx):
+
+        # Build the feature tensor
+        # Shape [num_nodes, 3]
+        x = torch.Tensor([self.df.Digi_x[idx], self.df.Digi_y[idx], self.df.Digi_z[idx]]).T
+
+        if self.mode == "EC":
+
+            # Make Edge Index Tensor
+            edge_index = torch.stack([ torch.Tensor(self.df.edge_index_0[idx]),torch.Tensor(self.df.edge_index_1[idx])]).to(torch.int)
+            # Create corresponding Edge Feature Tensor
+            edge_feat = torch.stack([torch.Tensor(self.df.edge_feat_0[idx]),torch.Tensor(self.df.edge_feat_1[idx]),torch.Tensor(self.df.edge_feat_2[idx])]).T
+            # Edge Labels
+            y = torch.Tensor(self.df.edge_label[idx])
+
+            # x is node features, truth_ID give the truth track_ID, Edep gives the energy deposition, 
+            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), SignalID = torch.tensor(self.df.iloc[idx].SignalID), truthP = torch.tensor(self.df.iloc[idx].TruthP), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y)
 
 
         elif self.mode == "OC":
@@ -132,15 +177,18 @@ def plot_pyg_graph_3d(data, plot_truth=False, plot_pred=False, node_size=30, lw=
 # n_primaries is the number of primaries simulated, this is only needed for label building 
 def GetGraphInfo(row, n_primaries, tracker = "Tagger"):
 
+    # Vertex position feature vectors in x, y, z
     x = np.stack([np.asarray(row[f'{tracker}_Digi_x']),
                 np.asarray(row[f'{tracker}_Digi_y']),
                 np.asarray(row[f'{tracker}_Digi_z'])], axis=1)
 
+    # Vertex position in beam direction
     v_pos = np.asarray(row[f'{tracker}_Digi_x'])   # shape (N,)
 
     # Make edges connect space point in subsequent layers only
-    D = np.abs(v_pos[:, None] - v_pos[None, :])   # shape (N, N)
-    T = (D < 110.0) & (D > 5.0)     
+    D = np.abs(v_pos[:, None] - v_pos[None, :])   # distance along beam direction between all vertices shape (N, N)
+    T = (D < 110.0) & (D > 5.0)     # Truth matrix for vertices satisfying distance conditions
+                                    # This was chosen for tagger but seems to work for recoil, I should revisit it
 
     # indices where T is True
     i_idx, j_idx = np.nonzero(T)                  # each shape (n_edges,)
@@ -166,7 +214,51 @@ def GetGraphInfo(row, n_primaries, tracker = "Tagger"):
 
     edge_label = (edge_index.T[:, None, :] == edge_index_truth.T[None, :, :]).all(axis=2).any(axis=1).astype(np.float32)
 
-    return edge_index[0], edge_index[1], edge_feat.T[0], edge_feat.T[1], edge_feat.T[2], edge_label 
+    return edge_index[0], edge_index[1], edge_feat.T[0], edge_feat.T[1], edge_feat.T[2], edge_label
+
+
+# Processes pandas dataframe to get graph information
+# n_primaries is the number of primaries simulated, this is only needed for label building 
+def GetGraphInfo_signal(row, tracker = "Tagger"):
+
+    # Vertex position feature vectors in x, y, z
+    x = np.stack([np.asarray(row[f'{tracker}_Digi_x']),
+                np.asarray(row[f'{tracker}_Digi_y']),
+                np.asarray(row[f'{tracker}_Digi_z'])], axis=1)
+
+    # Vertex position in beam direction
+    v_pos = np.asarray(row[f'{tracker}_Digi_x'])   # shape (N,)
+
+    # Make edges connect space point in subsequent layers only
+    D = np.abs(v_pos[:, None] - v_pos[None, :])   # distance along beam direction between all vertices shape (N, N)
+    T = (D < 110.0) & (D > 5.0)     # Truth matrix for vertices satisfying distance conditions
+                                    # This was chosen for tagger but seems to work for recoil, I should revisit it
+
+    # indices where T is True
+    i_idx, j_idx = np.nonzero(T)                  # each shape (n_edges,)
+    edge_index = np.stack((i_idx, j_idx), axis=0) # shape (2, n_edges)
+
+    # Build edge features as vector distance between connected nodes
+    src = edge_index[0]
+    dst = edge_index[1]
+    edge_feat = x[dst] - x[src]  # [E, F]
+
+    # Find edges that connect space points in subsequent layers from the same track
+    vID = np.asarray(row[f'{tracker}_Digi_trackID'])
+    TID = np.abs(vID[:, None] - vID[None, :]) == 0.0
+    T_truth = TID * T 
+
+    # Remove edges connecting non-signal vertices
+    NopT = vID != row['SignalID']
+    T_truth[:,NopT] = False
+    T_truth[NopT,:] = False
+
+    iT, jT = np.nonzero(T_truth)
+    edge_index_truth = np.stack((iT, jT), axis=0)    # shape (2, n_edges)
+
+    edge_label = (edge_index.T[:, None, :] == edge_index_truth.T[None, :, :]).all(axis=2).any(axis=1).astype(np.float32) # create a Truth label for all edges 
+
+    return edge_index[0], edge_index[1], edge_feat.T[0], edge_feat.T[1], edge_feat.T[2], edge_label
 
 
 def train(model, device, train_loader, optimizer, epoch):
@@ -307,3 +399,70 @@ def PrimitiveTrackBuilder(model, device, test_loader, thld=0.5, min_nodes = 5, u
                     df_tracks = pd.concat([df_tracks, df_new], ignore_index=True)
 
     return df_tracks
+
+
+def map_digi_to_momentum(row):
+    """
+    Maps each Digi_trackID to its corresponding momentum from TruthTrack_P.
+    If ID not found in TruthTrack_ID, assigns 0.
+    """
+    # Create a dictionary for fast lookup
+    id_to_p = dict(zip(row['TruthTrack_ID'], row['TruthTrack_P']))
+    
+    # Map each Digi_trackID to its momentum (0 if not found)
+    mapped_p = np.array([id_to_p.get(digi_id, 0.0) for digi_id in row['Digi_trackID']])
+    
+    return mapped_p
+
+
+def load_pickle_files_to_dataframe(directory):
+    """
+    Load all pickle files from a directory into a single DataFrame.
+    
+    Parameters:
+    -----------
+    directory : str or Path
+        Path to the directory containing pickle files
+        
+    Returns:
+    --------
+    pd.DataFrame
+        Combined DataFrame from all pickle files
+    """
+    dir_path = Path(directory)
+    
+    # Check if directory exists
+    if not dir_path.exists():
+        raise FileNotFoundError(f"Directory not found: {directory}")
+    
+    if not dir_path.is_dir():
+        raise NotADirectoryError(f"Not a directory: {directory}")
+    
+    # Get all pickle files
+    pickle_files = sorted(dir_path.glob("*.pkl")) + sorted(dir_path.glob("*.pickle"))
+    
+    if not pickle_files:
+        raise ValueError(f"No pickle files found in {directory}")
+    
+    # Load all pickle files
+    dataframes = []
+    for pkl_file in pickle_files:
+        df = pd.read_pickle(pkl_file)
+        dataframes.append(df)
+    
+    # Concatenate all dataframes
+    combined_df = pd.concat(dataframes, ignore_index=True)
+    
+    return combined_df
+
+
+def get_signal_recoilID(row):
+    # Get track ID of electron after dark brem
+    # Remove .item() to get array of signal IDs in the case of multiple signal events
+    return row.SimParticles_first[(row.SimParticles_processType == 11)&(row.SimParticles_pdgID == 11)].item()
+
+def get_signal_recoilP(row):
+    # index for dark brem recoil electron
+    index = np.where(row.SimParticles_first == row.SignalID)[0][0]
+    # Return initial P in MeV
+    return (np.sqrt(row.SimParticles_px**2+row.SimParticles_py**2+row.SimParticles_pz**2)[index])
