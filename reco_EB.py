@@ -164,20 +164,6 @@ tracking_recoil.min_hits = 8
 tracking_recoil.outlier_pval_ =  22.165497985508754
 
 
-GSF_tagger = tracking.GSFProcessor("Tagger_GSF")
-GSF_tagger.trackCollection = "TaggerTracksClean"
-GSF_tagger.measCollection  = "DigiTaggerSimHits"
-GSF_tagger.out_trk_collection = "GSFTagger"
-GSF_tagger.taggerTracking = True
-GSF_tagger.debug = False
-
-GSF_recoil = tracking.GSFProcessor("Recoil_GSF")
-GSF_recoil.trackCollection = "RecoilTracksClean"
-GSF_recoil.measCollection  = "DigiRecoilSimHits"
-GSF_recoil.out_trk_collection = "GSFRecoil"
-GSF_recoil.taggerTracking = False
-GSF_recoil.debug = True
-
 greedy_solver_tagger = tracking.GreedyAmbiguitySolver("GreedySolverTagger")
 greedy_solver_tagger.nMeasurementsMin = 5
 greedy_solver_tagger.maximumSharedHits = 2
@@ -192,54 +178,15 @@ greedy_solver_recoil.out_trk_collection = "RecoilTracksClean"
 greedy_solver_recoil.trackCollection = "RecoilTracks"
 greedy_solver_recoil.measCollection = "DigiRecoilSimHits"
 
-from LDMX.Tracking import dqm
-digi_dqm = dqm.TrackerDigiDQM()
-tracking_dqm = dqm.TrackingRecoDQM()
 
-seed_recoil_dqm = dqm.TrackingRecoDQM("SeedRecoilDQM")
-seed_recoil_dqm.track_collection = seederRecoil.out_seed_collection
-seed_recoil_dqm.truth_collection = "RecoilTruthSeeds"
-seed_recoil_dqm.title = ""
-seed_recoil_dqm.buildHistograms()
-
-
-recoil_dqm = dqm.TrackingRecoDQM("RecoilDQM")
-recoil_dqm.track_collection = "GSFRecoil"
-recoil_dqm.truth_collection = "RecoilTruthTracks"
-recoil_dqm.title = ""
-recoil_dqm.buildHistograms()
-
-seed_tagger_dqm = dqm.TrackingRecoDQM("SeedTaggerDQM")
-seed_tagger_dqm.track_collection = seederTagger.out_seed_collection
-seed_tagger_dqm.truth_collection = "TaggerTruthSeeds"
-seed_tagger_dqm.title = ""
-seed_tagger_dqm.buildHistograms()
-
-
-tagger_dqm = dqm.TrackingRecoDQM("TaggerDQM")
-tagger_dqm.track_collection = tracking_tagger.out_trk_collection
-tagger_dqm.truth_collection = "TaggerTruthTracks"
-tagger_dqm.title = ""
-tagger_dqm.buildHistograms()
 
 
 sequence   = [digiTagger, digiRecoil,
                 truth_tracking,
                 seederTagger, seederRecoil,
-                tracking_tagger, tracking_recoil, greedy_solver_tagger, greedy_solver_recoil,
-                recoil_dqm, seed_recoil_dqm, seed_tagger_dqm, tagger_dqm]
-
-
+                tracking_tagger, tracking_recoil, greedy_solver_tagger, greedy_solver_recoil]
 
 p.sequence.extend(sequence)
-
-
-
-
-
-
-
-
 
 p.termLogLevel=2
 p.logFrequency = 1
