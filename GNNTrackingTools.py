@@ -19,15 +19,20 @@ class MyInMemoryDataset(InMemoryDataset):
         super().__init__()
         self.df = df.reset_index(drop=True)
         self.mode = mode
+        # Compute Edep normalization stats from the full dataset
+        all_edep = np.concatenate(self.df.Digi_Edep.values)
+        self.edep_mean = float(all_edep.mean())
+        self.edep_std = float(all_edep.std())
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
 
-        # Build the feature tensor
-        # Shape [num_nodes, 3]
-        x = torch.Tensor([self.df.Digi_x[idx], self.df.Digi_y[idx], self.df.Digi_z[idx]]).T
+        # Build the feature tensor: [x, y, z, Edep_scaled]
+        # Shape [num_nodes, 4]
+        edep_scaled = (torch.Tensor(self.df.Digi_Edep[idx]) - self.edep_mean) / self.edep_std
+        x = torch.stack([torch.Tensor(self.df.Digi_x[idx]), torch.Tensor(self.df.Digi_y[idx]), torch.Tensor(self.df.Digi_z[idx]), edep_scaled], dim=1)
 
         if self.mode == "EC":
 
@@ -38,10 +43,10 @@ class MyInMemoryDataset(InMemoryDataset):
             # Edge Labels
             y = torch.Tensor(self.df.edge_label[idx])
 
-            # x is node features, truth_ID give the truth track_ID, Edep gives the energy deposition, 
-            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
-            # PDG ID can be added in the future by uncommenting 
-            #return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), pdgID = torch.Tensor(self.df.iloc[idx].Digi_pdgID), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
+            # x is node features [x, y, z, Edep_scaled], truth_ID gives the truth track_ID
+            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
+            # PDG ID can be added in the future by uncommenting
+            #return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), pdgID = torch.Tensor(self.df.iloc[idx].Digi_pdgID), y=y, truthP=torch.Tensor(self.df.iloc[idx].Digi_P) )
 
 
         elif self.mode == "OC":
@@ -59,15 +64,20 @@ class MyInMemoryDataset_signal(InMemoryDataset):
         super().__init__()
         self.df = df.reset_index(drop=True)
         self.mode = mode
+        # Compute Edep normalization stats from the full dataset
+        all_edep = np.concatenate(self.df.Digi_Edep.values)
+        self.edep_mean = float(all_edep.mean())
+        self.edep_std = float(all_edep.std())
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
 
-        # Build the feature tensor
-        # Shape [num_nodes, 3]
-        x = torch.Tensor([self.df.Digi_x[idx], self.df.Digi_y[idx], self.df.Digi_z[idx]]).T
+        # Build the feature tensor: [x, y, z, Edep_scaled]
+        # Shape [num_nodes, 4]
+        edep_scaled = (torch.Tensor(self.df.Digi_Edep[idx]) - self.edep_mean) / self.edep_std
+        x = torch.stack([torch.Tensor(self.df.Digi_x[idx]), torch.Tensor(self.df.Digi_y[idx]), torch.Tensor(self.df.Digi_z[idx]), edep_scaled], dim=1)
 
         if self.mode == "EC":
 
@@ -78,8 +88,8 @@ class MyInMemoryDataset_signal(InMemoryDataset):
             # Edge Labels
             y = torch.Tensor(self.df.edge_label[idx])
 
-            # x is node features, truth_ID give the truth track_ID, Edep gives the energy deposition, 
-            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), SignalID = torch.tensor(self.df.iloc[idx].SignalID), truthP = torch.tensor(self.df.iloc[idx].TruthP), Edep = torch.Tensor(self.df.iloc[idx].Digi_Edep).unsqueeze(1), y=y)
+            # x is node features [x, y, z, Edep_scaled], truth_ID gives the truth track_ID
+            return Data(x=x, edge_index=edge_index, edge_attr=edge_feat, truthID = torch.Tensor(self.df.iloc[idx].Digi_trackID), SignalID = torch.tensor(self.df.iloc[idx].SignalID), truthP = torch.tensor(self.df.iloc[idx].TruthP), y=y)
 
 
         elif self.mode == "OC":

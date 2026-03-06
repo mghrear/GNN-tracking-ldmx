@@ -94,7 +94,7 @@ class MyIN(nn.Module):
     def __init__(self, hidden_size):
         super(MyIN, self).__init__()
 
-        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 3, edge_feat_in = 3, node_feat_out=6, edge_feat_out=6)
+        self.IN1 = INLayer(hidden_size=hidden_size, node_feat_in = 4, edge_feat_in = 3, node_feat_out=6, edge_feat_out=6)
         self.IN2 = INLayer(hidden_size=hidden_size, node_feat_in = 6, edge_feat_in = 6, node_feat_out=8, edge_feat_out=8)
         self.IN3 = INLayer(hidden_size=hidden_size, node_feat_in = 8, edge_feat_in = 8, node_feat_out=9, edge_feat_out=9)
         self.R2 = RelationalModel(2*9+9, 1, hidden_size)
